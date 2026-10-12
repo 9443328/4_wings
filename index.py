@@ -1,10 +1,12 @@
 import asyncio
+import json
 import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, Update
+from http.server import BaseHTTPRequestHandler
 
-# Подтягиваем токен из настроек Vercel
+# Инициализируем бота. Токен берется из переменных окружения Vercel
 TOKEN = os.getenv("BOT_TOKEN", "8807378632:AAHHbPcfAJtjUy1K9ImLb0zEu5mKh6PoC-8")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -19,14 +21,36 @@ async def cmd_start(message: Message):
 async def any_text(message: Message):
     await message.answer(MY_TEXT)
 
-# Vercel автоматически ищет асинхронную функцию handler/app/application
-async def app(request):
-    if request.method == "POST":
+# Специальный класс-обработчик, который Vercel ожидает от Python скриптов
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length)
+        
         try:
-            json_data = await request.json()
+            # Читаем JSON от Telegram
+            json_data = json.loads(post_data.decode('utf-8'))
             update = Update.model_validate(json_data, context={"bot": bot})
-            await dp.feed_update(bot, update)
-            return {"status": "ok"}
+            
+            # Принудительно запускаем асинхронное событие aiogram внутри Serverless-сессии
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(dp.feed_update(bot, update))
+            loop.close()
+            
+            # Отвечаем серверу Telegram, что запрос успешно обработан
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok"}).encode())
+            
         except Exception as e:
-            return {"status": f"error: {e}"}, 500
-    return {"status": "Method Not Allowed"}, 405
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Бот-сервер работает!")
